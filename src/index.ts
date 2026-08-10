@@ -22,7 +22,7 @@ export const Config: Schema<Config> = Schema.object({
     .description("GitHub Personal Access Token")
     .required(),
   githubRepo: Schema.string()
-    .description("GitHub 仓库，格式：owner/repo")
+    .description("GitHub 上游仓库，格式：owner/repo")
     .required(),
   baseBranch: Schema.string().default("main").description("PR 目标分支"),
   allowedGroups: Schema.array(Schema.string())
@@ -67,6 +67,18 @@ interface GitHubContentResponse {
   sha: string;
 }
 
+interface GitHubUser {
+  login: string;
+}
+
+interface GitHubRepo {
+  fork: boolean;
+  parent?: {
+    full_name: string;
+  };
+  default_branch: string;
+}
+
 const SUPPORTED_EXTENSIONS = /\.(png|jpe?g|webp|gif|bmp)$/i;
 
 const parseRepo = (repo: string): [string, string] => {
@@ -79,16 +91,10 @@ const parseRepo = (repo: string): [string, string] => {
 
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger("hub-pusl");
-  logger.info(
-    "插件已加载，仓库：%s，目标分支：%s",
-    config.githubRepo,
-    config.baseBranch,
-  );
 
-  const historyPath = resolve(config.historyPath);
-  const [owner, repo] = parseRepo(config.githubRepo);
-  const apiBase = `https://api.github.com/repos/${owner}/${repo}`;
-  const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${config.baseBranch}`;
+  const [upstreamOwner, upstreamRepo] = parseRepo(config.githubRepo);
+  const upstreamApiBase = `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}`;
+  const upstreamRawBase = `https://raw.githubusercontent.com/${upstreamOwner}/${upstreamRepo}/${config.baseBranch}`;
 
   const githubHeaders = {
     Authorization: `Bearer ${config.githubToken}`,
@@ -96,7 +102,34 @@ export function apply(ctx: Context, config: Config) {
     "X-GitHub-Api-Version": "2022-11-28",
   };
 
+  // 在启动时获取 Token 用户名，用于 fork 操作
+  let forkOwner = "";
+  ctx.on("ready", async () => {
+    try {
+      const user = await ctx.http.get<GitHubUser>(
+        "https://api.github.com/user",
+        {
+          headers: githubHeaders,
+        },
+      );
+      forkOwner = user.login;
+      logger.info(
+        "插件已加载，上游仓库：%s，Token 用户：%s，目标分支：%s",
+        config.githubRepo,
+        forkOwner,
+        config.baseBranch,
+      );
+    } catch (error) {
+      logger.error("获取 GitHub 用户信息失败，请检查 Token：%o", error);
+    }
+  });
+
+  const getForkApiBase = (): string => {
+    return `https://api.github.com/repos/${forkOwner}/${upstreamRepo}`;
+  };
+
   const loadHistory = (): PullHistory => {
+    const historyPath = resolve(config.historyPath);
     if (!existsSync(historyPath)) return {};
     try {
       return JSON.parse(readFileSync(historyPath, "utf-8")) as PullHistory;
@@ -106,6 +139,7 @@ export function apply(ctx: Context, config: Config) {
   };
 
   const saveHistory = (history: PullHistory): void => {
+    const historyPath = resolve(config.historyPath);
     mkdirSync(dirname(historyPath), { recursive: true });
     writeFileSync(historyPath, JSON.stringify(history, null, 2));
   };
@@ -174,14 +208,28 @@ export function apply(ctx: Context, config: Config) {
     return undefined;
   };
 
+  const extractPlainText = (elements: h[]): string => {
+    return elements
+      .map((el) => {
+        if (typeof el === "string") return el;
+        if (el.type === "text") return el.attrs?.content ?? el.toString();
+        if (el.type === "img" || el.type === "image") return "";
+        if (el.children?.length) return extractPlainText(el.children);
+        return "";
+      })
+      .join("")
+      .trim();
+  };
+
   const sanitizeFilename = (title: string): string => {
     return title.replace(/[^\w\u4e00-\u9fa5\-]/g, "_").slice(0, 64);
   };
 
+  // 检查上游仓库中文件是否已存在
   const checkFileExists = async (path: string): Promise<boolean> => {
     try {
       await ctx.http.get<GitHubContentResponse>(
-        `${apiBase}/contents/${path}?ref=${config.baseBranch}`,
+        `${upstreamApiBase}/contents/${path}?ref=${config.baseBranch}`,
         { headers: githubHeaders },
       );
       return true;
@@ -193,33 +241,124 @@ export function apply(ctx: Context, config: Config) {
     }
   };
 
-  const getBaseSha = async (): Promise<string> => {
-    const ref = await ctx.http.get<GitHubRef>(
-      `${apiBase}/git/ref/heads/${config.baseBranch}`,
+  // 确保 Token 用户下有上游仓库的 fork，没有则创建
+  const ensureFork = async (): Promise<string> => {
+    if (!forkOwner) {
+      throw new Error("Token 用户信息未获取，请检查 Token 配置后重启插件。");
+    }
+
+    // 检查 fork 是否已存在
+    try {
+      const repoInfo = await ctx.http.get<GitHubRepo>(`${getForkApiBase()}`, {
+        headers: githubHeaders,
+      });
+      if (repoInfo.fork && repoInfo.parent?.full_name === config.githubRepo) {
+        logger.debug("Fork 已存在：%s/%s", forkOwner, upstreamRepo);
+        return repoInfo.default_branch;
+      }
+      // 同名仓库存在但不是上游的 fork，报错
+      if (!repoInfo.fork || repoInfo.parent?.full_name !== config.githubRepo) {
+        throw new Error(
+          `用户 ${forkOwner} 下已存在 ${upstreamRepo} 仓库但不是上游的 fork，请手动处理。`,
+        );
+      }
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response
+        ?.status;
+      if (status !== 404) throw error;
+    }
+
+    // Fork 不存在，创建 fork
+    logger.info(
+      "Fork 不存在，正在创建：%s/%s → %s/%s",
+      upstreamOwner,
+      upstreamRepo,
+      forkOwner,
+      upstreamRepo,
+    );
+    await ctx.http.post(
+      `${upstreamApiBase}/forks`,
+      {},
       { headers: githubHeaders },
     );
-    return ref.object.sha;
+
+    // GitHub fork 操作是异步的，等待 fork 就绪
+    logger.debug("等待 fork 创建完成...");
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const repoInfo = await ctx.http.get<GitHubRepo>(`${getForkApiBase()}`, {
+          headers: githubHeaders,
+        });
+        if (repoInfo.fork) {
+          logger.info(
+            "Fork 创建完成：%s/%s，默认分支：%s",
+            forkOwner,
+            upstreamRepo,
+            repoInfo.default_branch,
+          );
+          return repoInfo.default_branch;
+        }
+      } catch {
+        // fork 还没就绪，继续等待
+      }
+    }
+    throw new Error("Fork 创建超时，请稍后重试。");
   };
 
-  const createBranch = async (branch: string): Promise<void> => {
-    const sha = await getBaseSha();
+  // 同步 fork 的分支到上游最新
+  const syncForkBranch = async (forkDefaultBranch: string): Promise<string> => {
+    // 获取上游分支的 SHA
+    const upstreamRef = await ctx.http.get<GitHubRef>(
+      `${upstreamApiBase}/git/ref/heads/${config.baseBranch}`,
+      { headers: githubHeaders },
+    );
+    const upstreamSha = upstreamRef.object.sha;
+    logger.debug("上游分支 %s SHA：%s", config.baseBranch, upstreamSha);
+
+    // 更新 fork 的默认分支指向上游
+    try {
+      await ctx.http.patch(
+        `${getForkApiBase()}/git/refs/heads/${forkDefaultBranch}`,
+        { sha: upstreamSha, force: true },
+        { headers: githubHeaders },
+      );
+      logger.debug(
+        "Fork 分支 %s 已同步到上游 %s",
+        forkDefaultBranch,
+        upstreamSha,
+      );
+    } catch (error) {
+      logger.warn("同步 fork 分支失败，继续使用当前状态：%o", error);
+    }
+
+    return upstreamSha;
+  };
+
+  // 在 fork 上创建新分支
+  const createBranchOnFork = async (
+    branch: string,
+    sha: string,
+  ): Promise<void> => {
     await ctx.http.post(
-      `${apiBase}/git/refs`,
+      `${getForkApiBase()}/git/refs`,
       {
         ref: `refs/heads/${branch}`,
         sha,
       },
       { headers: githubHeaders },
     );
+    logger.debug("在 fork 上创建分支：%s", branch);
   };
 
-  const createFile = async (
+  // 在 fork 上创建文件
+  const createFileOnFork = async (
     path: string,
     branch: string,
     buffer: Buffer,
   ): Promise<void> => {
     await ctx.http.put(
-      `${apiBase}/contents/${path}`,
+      `${getForkApiBase()}/contents/${path}`,
       {
         message: `[HubPusl] add image ${path.split("/").pop()}`,
         content: buffer.toString("base64"),
@@ -229,17 +368,18 @@ export function apply(ctx: Context, config: Config) {
     );
   };
 
-  const createPullRequest = async (
+  // 从 fork 向上游创建跨仓库 PR
+  const createCrossRepoPullRequest = async (
     title: string,
     branch: string,
   ): Promise<string> => {
     const response = await ctx.http.post<{
       html_url: string;
     }>(
-      `${apiBase}/pulls`,
+      `${upstreamApiBase}/pulls`,
       {
         title: `[HubPusl] ${title}`,
-        head: branch,
+        head: `${forkOwner}:${branch}`,
         base: config.baseBranch,
         body: `Submitted by HubPusl bot for image \`${title}\`.`,
       },
@@ -270,9 +410,17 @@ export function apply(ctx: Context, config: Config) {
 
     const { buffer, extension } = await fetchImage(imageUrl);
     const sizeMb = buffer.length / 1024 / 1024;
-    logger.debug("图片下载完成，大小：%.2f MB，扩展名：%s", sizeMb, extension);
+    logger.debug(
+      "图片下载完成，大小：%s MB，扩展名：%s",
+      sizeMb.toFixed(2),
+      extension,
+    );
     if (sizeMb > config.maxFileSize) {
-      logger.warn("图片 %.2f MB 超过限制 %d MB", sizeMb, config.maxFileSize);
+      logger.warn(
+        "图片 %s MB 超过限制 %d MB",
+        sizeMb.toFixed(2),
+        config.maxFileSize,
+      );
       return `图片大小 ${sizeMb.toFixed(2)} MB 超过限制 ${config.maxFileSize} MB。`;
     }
 
@@ -291,34 +439,50 @@ export function apply(ctx: Context, config: Config) {
       return `文件 \`${filename}\` 已存在，请更换标题后再试。`;
     }
 
+    // 确保 fork 存在
+    const forkDefaultBranch = await ensureFork();
+
+    // 同步 fork 并获取最新 SHA
+    const latestSha = await syncForkBranch(forkDefaultBranch);
+
+    // 在 fork 上创建新分支
     const branch = `hub-pusl/${safeTitle}-${Date.now()}`;
-    logger.debug("创建分支：%s", branch);
-    await createBranch(branch);
-    logger.debug("上传文件到分支：%s", branch);
-    await createFile(path, branch, buffer);
-    logger.debug("创建 PR，分支：%s", branch);
-    const prUrl = await createPullRequest(title, branch);
+    await createBranchOnFork(branch, latestSha);
+
+    // 在 fork 上上传文件
+    logger.debug("上传文件到 fork 分支：%s", branch);
+    await createFileOnFork(path, branch, buffer);
+
+    // 创建跨仓库 PR
+    logger.debug(
+      "创建跨仓库 PR：%s:%s → %s:%s",
+      forkOwner,
+      branch,
+      upstreamOwner,
+      config.baseBranch,
+    );
+    const prUrl = await createCrossRepoPullRequest(title, branch);
     logger.info("push 成功，PR：%s", prUrl);
     return `图片已推送，PR：${prUrl}`;
   };
 
   const listRemoteImages = async (): Promise<GitHubContentItem[]> => {
     try {
-      logger.debug("列出远程图片目录：%s", config.imageDir);
+      logger.debug("列出上游图片目录：%s", config.imageDir);
       const items = await ctx.http.get<GitHubContentItem[]>(
-        `${apiBase}/contents/${config.imageDir}?ref=${config.baseBranch}`,
+        `${upstreamApiBase}/contents/${config.imageDir}?ref=${config.baseBranch}`,
         { headers: githubHeaders },
       );
       const images = items.filter(
         (item) => item.type === "file" && SUPPORTED_EXTENSIONS.test(item.name),
       );
-      logger.debug("远程图片数量：%d", images.length);
+      logger.debug("上游图片数量：%d", images.length);
       return images;
     } catch (error) {
       const status = (error as { response?: { status?: number } })?.response
         ?.status;
       if (status === 404) {
-        logger.debug("远程图片目录不存在");
+        logger.debug("上游图片目录不存在");
         return [];
       }
       throw error;
@@ -357,7 +521,7 @@ export function apply(ctx: Context, config: Config) {
     saveHistory(history);
 
     const buffer = await ctx.http.get<ArrayBuffer>(
-      `${rawBase}/${selected.path}`,
+      `${upstreamRawBase}/${selected.path}`,
       { responseType: "arraybuffer" },
     );
     const extension = extname(selected.name).slice(1) || "png";
@@ -382,8 +546,13 @@ export function apply(ctx: Context, config: Config) {
         logger.warn("push 命令缺少标题，用户：%s", session.userId);
         return "请提供图片标题，例如：nwtf-push 可爱小猫";
       }
+      const cleanTitle = extractPlainText(session.elements ?? []);
+      if (!cleanTitle) {
+        logger.warn("push 命令标题解析后为空，用户：%s", session.userId);
+        return "请提供图片标题，例如：nwtf-push 可爱小猫";
+      }
       try {
-        return await pushImage(session, title.trim());
+        return await pushImage(session, cleanTitle.trim());
       } catch (error) {
         logger.error("push 命令执行失败：%o", error);
         return `推送失败：${error instanceof Error ? error.message : String(error)}`;
