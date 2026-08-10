@@ -1,0 +1,8 @@
+node_modules/
+lib/
+*.log
+*.json
+!package.json
+!tsconfig.json
+hub-pusl-history.json
+.DS_Store

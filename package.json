@@ -1,0 +1,39 @@
+{
+  "name": "koishi-plugin-hub-pusl",
+  "version": "0.1.0",
+  "description": "Koishi plugin for pushing images to a GitHub repo via PR and pulling random images back to QQ groups, using GitHub API only.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "readme.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write src/**/*.ts",
+    "test": "node --test test/index.test.js"
+  },
+  "keywords": [
+    "koishi",
+    "plugin",
+    "qq",
+    "image",
+    "hub"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "koishi": "^4.18.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "通过 GitHub API 在 Q 群内推送图片并创建 PR，或随机拉取图片到群内，无需本地 clone 仓库。"
+    }
+  }
+}
