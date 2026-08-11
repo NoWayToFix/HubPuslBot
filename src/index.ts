@@ -9,6 +9,7 @@ export interface Config {
   githubToken: string;
   githubRepo: string;
   baseBranch: string;
+  githubMirror: string;
   allowedGroups: string[];
   adminUsers: string[];
   imageDir: string;
@@ -25,6 +26,11 @@ export const Config: Schema<Config> = Schema.object({
     .description("GitHub 上游仓库，格式：owner/repo")
     .required(),
   baseBranch: Schema.string().default("main").description("PR 目标分支"),
+  githubMirror: Schema.string()
+    .default("")
+    .description(
+      "GitHub 镜像前缀（用于 pull 下载图片），例如 https://gh-proxy.org/，留空则直连",
+    ),
   allowedGroups: Schema.array(Schema.string())
     .default([])
     .description("允许的群号列表，为空则允许所有群"),
@@ -94,12 +100,18 @@ export function apply(ctx: Context, config: Config) {
 
   const [upstreamOwner, upstreamRepo] = parseRepo(config.githubRepo);
   const upstreamApiBase = `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}`;
-  const upstreamRawBase = `https://raw.githubusercontent.com/${upstreamOwner}/${upstreamRepo}/${config.baseBranch}`;
 
   const githubHeaders = {
     Authorization: `Bearer ${config.githubToken}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
+  };
+
+  const buildDownloadUrl = (path: string): string => {
+    if (config.githubMirror) {
+      return `${config.githubMirror}https://github.com/${upstreamOwner}/${upstreamRepo}/blob/${config.baseBranch}/${path}`;
+    }
+    return `https://raw.githubusercontent.com/${upstreamOwner}/${upstreamRepo}/${config.baseBranch}/${path}`;
   };
 
   // 在启动时获取 Token 用户名，用于 fork 操作
@@ -520,10 +532,11 @@ export function apply(ctx: Context, config: Config) {
     history[groupId] = [...(history[groupId] ?? []), selected.name];
     saveHistory(history);
 
-    const buffer = await ctx.http.get<ArrayBuffer>(
-      `${upstreamRawBase}/${selected.path}`,
-      { responseType: "arraybuffer" },
-    );
+    const downloadUrl = buildDownloadUrl(selected.path);
+    logger.debug("下载图片：%s", downloadUrl);
+    const buffer = await ctx.http.get<ArrayBuffer>(downloadUrl, {
+      responseType: "arraybuffer",
+    });
     const extension = extname(selected.name).slice(1) || "png";
     const mimeType = extensionToMimeType(extension);
     const base64 = Buffer.from(buffer).toString("base64");
@@ -546,7 +559,7 @@ export function apply(ctx: Context, config: Config) {
         logger.warn("push 命令缺少标题，用户：%s", session.userId);
         return "请提供图片标题，例如：nwtf-push 可爱小猫";
       }
-      const cleanTitle = extractPlainText(session.elements ?? []);
+      const cleanTitle = extractPlainText(h.parse(title));
       if (!cleanTitle) {
         logger.warn("push 命令标题解析后为空，用户：%s", session.userId);
         return "请提供图片标题，例如：nwtf-push 可爱小猫";
