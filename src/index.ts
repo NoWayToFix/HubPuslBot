@@ -542,7 +542,10 @@ export function apply(ctx: Context, config: Config) {
     const base64 = Buffer.from(buffer).toString("base64");
     logger.debug("图片下载完成，大小：%d bytes", buffer.byteLength);
 
-    return [h.text(selected.name), h.image(`data:${mimeType};base64,${base64}`)];
+    return [
+      h.text(selected.name),
+      h.image(`data:${mimeType};base64,${base64}`),
+    ];
   };
 
   ctx
