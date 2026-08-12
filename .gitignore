@@ -3,6 +3,7 @@ lib/
 *.log
 *.json
 !package.json
+!package-lock.json
 !tsconfig.json
 hub-pusl-history.json
 .DS_Store
