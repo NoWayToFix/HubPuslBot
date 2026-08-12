@@ -30,6 +30,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Configure git
+        run: |
+          git config user.name "${{ vars.GIT_USER_NAME }}"
+          git config user.email "${{ vars.GIT_USER_EMAIL }}"
+
       - name: Update version
         run: |
           npm version "${{ github.event.inputs.version }}" -m "chore: release v%s"
