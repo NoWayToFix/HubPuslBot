@@ -6,7 +6,8 @@
   "types": "lib/index.d.ts",
   "files": [
     "lib",
-    "readme.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -21,7 +22,16 @@
     "image",
     "hub"
   ],
-  "license": "MIT",
+  "author": "Yukino_fox",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NoWayToFix/HubPuslBot.git"
+  },
+  "homepage": "https://github.com/NoWayToFix/HubPuslBot",
+  "bugs": {
+    "url": "https://github.com/NoWayToFix/HubPuslBot/issues"
+  },
   "peerDependencies": {
     "koishi": "^4.18.0"
   },
