@@ -501,7 +501,14 @@ export function apply(ctx: Context, config: Config) {
     }
   };
 
-  const pullImage = async (session: Session): Promise<string | h[]> => {
+  const getImageBaseName = (filename: string): string => {
+    return filename.replace(/\.[^.]+$/, "");
+  };
+
+  const pullImage = async (
+    session: Session,
+    name?: string,
+  ): Promise<string | h[]> => {
     logger.debug(
       "收到 pull 请求，群：%s，用户：%s",
       session.guildId,
@@ -515,22 +522,38 @@ export function apply(ctx: Context, config: Config) {
       return "仓库中暂无图片。";
     }
 
-    const groupId = String(session.guildId ?? session.userId);
-    const history = loadHistory();
-    const historySet = new Set(history[groupId] ?? []);
-    logger.debug("群 %s 历史记录数量：%d", groupId, historySet.size);
+    let selected: GitHubContentItem;
 
-    let candidates = images.filter((image) => !historySet.has(image.name));
-    if (candidates.length === 0) {
-      logger.info("群 %s 所有图片都已发送过，重置历史记录", groupId);
-      history[groupId] = [];
-      candidates = images;
+    if (name) {
+      const target = name.trim();
+      const match = images.find(
+        (image) =>
+          getImageBaseName(image.name).toLowerCase() === target.toLowerCase(),
+      );
+      if (!match) {
+        logger.warn("未找到指定图片：%s", target);
+        return `未找到名为 \`${target}\` 的图片。`;
+      }
+      selected = match;
+      logger.info("群 %s 指定拉取图片：%s", session.guildId, selected.name);
+    } else {
+      const groupId = String(session.guildId ?? session.userId);
+      const history = loadHistory();
+      const historySet = new Set(history[groupId] ?? []);
+      logger.debug("群 %s 历史记录数量：%d", groupId, historySet.size);
+
+      let candidates = images.filter((image) => !historySet.has(image.name));
+      if (candidates.length === 0) {
+        logger.info("群 %s 所有图片都已发送过，重置历史记录", groupId);
+        history[groupId] = [];
+        candidates = images;
+      }
+
+      selected = candidates[Math.floor(Math.random() * candidates.length)];
+      logger.info("群 %s 随机选中图片：%s", groupId, selected.name);
+      history[groupId] = [...(history[groupId] ?? []), selected.name];
+      saveHistory(history);
     }
-
-    const selected = candidates[Math.floor(Math.random() * candidates.length)];
-    logger.info("群 %s 选中图片：%s", groupId, selected.name);
-    history[groupId] = [...(history[groupId] ?? []), selected.name];
-    saveHistory(history);
 
     const downloadUrl = buildDownloadUrl(selected.path);
     logger.debug("下载图片：%s", downloadUrl);
@@ -576,14 +599,20 @@ export function apply(ctx: Context, config: Config) {
     });
 
   ctx
-    .command(`${config.commandPrefix}-pull`, "从 Hub 仓库随机拉取一张图片")
-    .action(async ({ session }) => {
+    .command(
+      `${config.commandPrefix}-pull [name:text]`,
+      "从 Hub 仓库拉取图片（不指定名字则随机）",
+    )
+    .action(async ({ session }, name) => {
       if (!session) {
         logger.warn("pull 命令缺少会话信息");
         return "会话信息缺失。";
       }
       try {
-        return await pullImage(session);
+        const cleanName = name
+          ? extractPlainText(h.parse(name)).trim()
+          : undefined;
+        return await pullImage(session, cleanName);
       } catch (error) {
         logger.error("pull 命令执行失败：%o", error);
         return `拉取失败：${error instanceof Error ? error.message : String(error)}`;
