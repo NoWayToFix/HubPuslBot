@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-hub-pusl",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Koishi plugin for pushing images to a GitHub repo via PR and pulling random images back to QQ groups, using GitHub API only.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
