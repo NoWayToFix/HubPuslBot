@@ -95,9 +95,24 @@ const parseRepo = (repo: string): [string, string] => {
   return [parts[0], parts[1]];
 };
 
-export function apply(ctx: Context, config: Config) {
-  const logger = ctx.logger("hub-pusl");
+export function apply(_ctx: Context, config: Config) {
+  let registeredPrefix = [];
+  _ctx.on("fork", (ctx: Context, config: Config) => {
+    const cmdPrefix = config.commandPrefix;
+    const logger = ctx.logger(`hub-pusl(${cmdPrefix})`);
+    if(registeredPrefix.indexOf(cmdPrefix) > -1){
+      // 有相同的prefix了
+      logger.error(`唔…命令前缀 ${cmdPrefix} 已经有一个配置在用了，要不换一个呢？`);
+      throw new Error(`duplicated command prefix: ${cmdPrefix}`);
+    }
+    // ok没冲突，能用
+    registeredPrefix.push(cmdPrefix);
+    ctx.on("dispose", () => {
+      // 要养成用完清理垃圾的习惯
+      registeredPrefix = registeredPrefix.filter(i => i !== cmdPrefix);
+    });
 
+    // 剩下这块就是原本的逻辑了 太长了懒得对齐tab了（）
   const [upstreamOwner, upstreamRepo] = parseRepo(config.githubRepo);
   const upstreamApiBase = `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}`;
 
@@ -573,7 +588,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx
     .command(
-      `${config.commandPrefix}-push <title:text>`,
+      `${cmdPrefix}-push <title:text>`,
       "推送图片到 Hub 仓库并创建 PR",
     )
     .action(async ({ session }, title) => {
@@ -600,7 +615,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx
     .command(
-      `${config.commandPrefix}-pull [name:text]`,
+      `${cmdPrefix}-pull [name:text]`,
       "从 Hub 仓库拉取图片（不指定名字则随机）",
     )
     .action(async ({ session }, name) => {
@@ -618,4 +633,5 @@ export function apply(ctx: Context, config: Config) {
         return `拉取失败：${error instanceof Error ? error.message : String(error)}`;
       }
     });
+  });
 }
